@@ -1,0 +1,506 @@
+%\VignetteIndexEntry{SimBindProfiles: Similar Binding Profiles, identifies common and unique regions in array genome tiling array data}
+%\VignetteDepends{Ringo, mclust, limma}
+%VignetteKeywords{microarray ChIP-chip DamID-chip, Nimblegen, Affymetrix}
+%VignettePackage{SimBindProfiles}
+
+\documentclass[11pt, a4paper]{article}
+\usepackage[nogin]{Sweave}
+\usepackage{hyperref}
+%%\usepackage[authoryear, round]{natbib}
+
+%%\SweaveOpts{echo=T,eval=T,cache=F}
+
+\newcommand{\R}{\texttt{R} }
+\newcommand{\Rfunction}[1]{{\texttt{#1}}}
+\newcommand{\Robject}[1]{{\texttt{#1}}}
+\newcommand{\Rpackage}[1]{{\textit{#1}}}
+\newcommand{\Rclass}[1]{{\textit{#1}}}
+\newcommand{\email}[1]{\href{mailto:#1}{\normalfont\texttt{#1}}}
+%% colors
+\usepackage{color}
+\definecolor{Red}{rgb}{0.7,0,0}
+\definecolor{Blue}{rgb}{0,0,0.8}
+
+\parindent0mm
+\parskip2ex plus0.5ex minus0.3ex
+
+\hypersetup{%
+  hyperindex = {true},
+  colorlinks = {true},
+  linktocpage = {true},
+  plainpages = {false},
+  linkcolor = {Blue},
+  citecolor = {Blue},
+  urlcolor = {Red},
+  pdfstartview = {Fit},
+  pdfpagemode = {UseOutlines},
+  pdfview = {XYZ null null null}
+}
+
+\addtolength{\textwidth}{2cm}
+\addtolength{\oddsidemargin}{-1cm}
+\addtolength{\evensidemargin}{-1cm}
+\addtolength{\textheight}{2cm}
+\addtolength{\topmargin}{-1cm}
+\addtolength{\skip\footins}{1cm}
+
+
+\title{SimBindProfiles: Similar Binding Profiles, identifies common and unique 
+regions in array genome tiling array data}
+\author{Bettina Fischer}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+
+\section{Introduction}\label{sec:into}
+
+SimBindProfiles identifies common and unique binding regions in genome tiling array data. 
+This package does not rely on peak calling, but directly compares binding profiles 
+processed on the same array platform. It implements a simple threshold approach, 
+thus allowing retrieval of commonly and differentially bound regions between 
+datasets as well as events of compensation and increased binding.
+
+The tool requires each data set in SGR file format, which are tab-delimited files 
+with chromosome, position and signal value columns. We suggest preprocessing two-colour 
+microarray data with \Rpackage{Ringo} \cite{Ringo2007} and Affymetrix cel files with 
+\Rpackage{Starr} \cite{Starr2009}, which perform smoothing of probe intensities across replicate 
+arrays for each data set. It is important that data are sorted by chromosomes 
+and ascending positions along each chromosome.
+
+<<loadpackage, echo=TRUE, results=hide>>=
+library("SimBindProfiles")
+@
+
+
+\section{Reading data and normalisation}\label{sec:read}
+
+We provide three working example data sets in this vignette. These data have been processed 
+on NimbleGen Drosophila melanogaster DM5 Tiling Set HX1 in triplicates and smoothed 
+into window scores using \Rpackage{Ringo}. 
+
+In \textit{Drosophila melanogaster}, SoxNeuro (SoxN) and Dichaete (D) belong to the SoxB family of 
+transcription factors. SoxN and Dichaete play essential roles in many aspects of neurogenesis and 
+exhibit some degree of functional redundancy in cells where they are coexpressed. Here, we study 
+the binding patterns of SoxN and Dichaete in wildtype (wt) and SoxN mutant embryos via DamID. 
+In this vignette, we only use the probes located on chromosome X between 1-6000000 bp:\newline
+SoxNDam = SoxN binding in wt embryos\newline
+SoxN-DDam = Dichaete binding in SoxN mutants\newline
+DDam = Dichaete binding in wt embryos\newline
+
+<<exampleData, echo=TRUE>>=
+dataPath <- system.file("extdata",package="SimBindProfiles")
+list.files(dataPath, pattern=".txt")
+head(read.delim(paste(dataPath, "SoxNDam_trunc.txt", sep="/"), 
+	header=FALSE, nrows=5))
+@
+
+To read data into an \Rclass{ExpressionSet} object each file name is specified 
+omitting the .txt extension. While reading the files, data is quantile normalised as per 
+\Rpackage{limma} \cite{limma05}. For more details on \Rclass{ExpressionSet}
+please refer to "An Introduction to Bioconductor's ExpressionSet Class" \cite{expressionSet}.
+
+<<readTestData, echo=TRUE, results=hide>>=
+readTestSGR <- readSgrFiles(X=c("SoxNDam_trunc", "SoxN-DDam_trunc", 
+	"DDam_trunc"), dataPath)
+@
+
+We continue in this vignette using the larger chromosome X probe set data which was previously saved as 
+SGR.Rdata object and can be loaded and viewed.
+
+<<loadData>>=
+dataPath <- system.file("data",package="SimBindProfiles")
+load(paste(dataPath, "SGR.RData", sep="/"))
+print(SGR)
+@
+
+A useful plot comparing all the data sets and their correlation after normalisation can be created 
+with the \Rfunction{eSetScatterPlot} function (Figure~\ref{fig:SimBindProfiles-scatter}).
+
+<<scatter0, eval=FALSE>>=
+eSetScatterPlot(SGR)
+@
+
+<<scatter, eval=TRUE, results=hide, echo=FALSE>>=
+png("SimBindProfiles-scatter.png")
+eSetScatterPlot(SGR)
+dev.off()
+@
+
+\begin{figure}[h!tb]
+\centering
+\includegraphics[width=0.5\textwidth]{SimBindProfiles-scatter.png}
+\caption{\textit{Smoothed scatterplots of normalised signals and the corresponding correlations.}}
+\label{fig:SimBindProfiles-scatter}
+\end{figure}
+
+
+
+\section{Determining a bound cut-off and a difference cut-off}\label{sec:cutoff}
+
+In order to identify probes or regions, which are bound similarly or differentially bound between the 
+data sets, \Robject{bound.cutoff} and \Robject{diff.cutoff} (difference cut-off) thresholds 
+have to be chosen. 
+
+We implemented two methods to set the bound cut-off, probes above this threshold are 
+considered "bound". The \Rfunction{twoGaussiansNull} method established in the \Rpackage{Ringo} 
+package \cite{Ringo2007}, in which data is assumed to follow a mixture of two 
+Gaussian distributions. The Gaussian with the lower mean value is assumed to be the 
+null distribution and probe levels are assigned p-values based on this null distribution. 
+Alternatively the user can select the \Rfunction{normalNull} method which assumes 
+the null distribution is normal and symmetrical around the mode or zero. For both methods the user 
+can decide if the resulting p-values are to be adjusted for multiple testing (fdr) or 
+select a p-value threshold.
+
+In our example we use the twoGaussiansNull at 25\% FDR, the function also provides 
+a QC plot of the two Gaussians curves and an optional p-value histogram (not shown).
+
+<<boundCutoff, eval=FALSE>>=
+bound.cutoff <- findBoundCutoff(SGR, method="twoGaussiansNull", fdr=0.25)
+@
+
+<<boundCutoffprecomputed, echo=FALSE, eval=TRUE>>=
+dataPath <- system.file("data",package="SimBindProfiles")
+load(paste(dataPath, "precomputed.RData", sep="/"))
+cat("Using bound.cutoff =", bound.cutoff, "\n")
+@
+
+To show the \Robject{bound.cutoff} in relation to the data one can plot a histogram of the data
+with the bound cutoff (Figure~\ref{fig:SimBindProfiles-boundHist}).
+
+<<boundHistogram0, eval=FALSE>>=
+hist(exprs(SGR)[,1], breaks=1000, freq=FALSE, border="grey", 
+	main=sampleNames(SGR)[1], xlab="signal", 
+	sub=paste("bound.cutoff =", bound.cutoff, sep=" "))
+abline(v=bound.cutoff, col="red", lty=3, lwd=2)
+@
+
+<<boundHistogram, eval=TRUE, results=hide, echo=FALSE>>=
+png("SimBindProfiles-boundHist.png")
+hist(exprs(SGR)[,1], breaks=1000, freq=FALSE, border="grey", 
+	main=sampleNames(SGR)[1], xlab="signal", 
+	sub=paste("bound.cutoff =", bound.cutoff, sep=" "))
+abline(v=bound.cutoff, col="red", lty=3, lwd=2)
+dev.off()
+@
+
+\begin{figure}[!hbtp]
+\centering
+\includegraphics[width=0.5\textwidth]{SimBindProfiles-boundHist.png}
+\caption{\textit{Histogram of the signal of SoxNDam. Probes with a signal above the bound.cutoff 
+threshold are considered "bound".}}
+\label{fig:SimBindProfiles-boundHist}
+\end{figure}
+
+
+A probe is considered uniquely bound in one data set if it is bound above the 
+\Robject{diff.cutoff} threshold to the other set. We propose that the difference 
+cut-off should be smaller than the bound cut-off, but for more stringent analysis 
+criteria it can also be set to the same value as the \Robject{bound.cutoff}.
+
+In our example we used the diff.cutoff as 75\% of the \Robject{bound.cutoff}
+
+<<diffCutoff>>=
+diff.cutoff <- round(bound.cutoff * 0.75,2)
+@
+
+
+We can plot the probe intensities along parts of the chromosome using the 
+\Rfunction{chipAlongChrom} function from \Rpackage{Ringo}, which can be called via the plot
+command. First we create a \Rclass{probeAnno} class object which contains the 
+mapping between the probes and their genomic positions and uses the information stored 
+in the \Rclass{ExpressionSet} object and requires the probe length of the oligo on the
+array. In Figure~\ref{fig:visualiseBound} SoxNDam (green curve) is uniquely bound 
+at region 2324000 - 2326000 as the intensity is above the bound.cutoff. Whereas 
+SoxN-DDam (orange) is also above the bound.cutoff at region 2334000 - 2336000 but the 
+difference in the intensity of SoxNDam is too small (below diff.cutoff) to call this 
+region uniquely bound.
+
+<<createProbeAnno, results=hide>>=
+probeAnno <- probeAnnoFromESet(SGR, probeLength=50)
+@
+<<visualiseBound, eval=FALSE>>=
+plot(SGR, probeAnno, chrom="X", xlim=c(2323000,2337000), ylim=c(-3,4), 
+	samples=c(1,2))
+@
+
+\begin{figure}[!hbtp]
+\centering
+<<visualiseBound, fig=TRUE, width=6, height=3, pointsize=8, echo=FALSE>>=
+plot(SGR, probeAnno, chrom="X", xlim=c(2323000,2337000), ylim=c(-3,4), samples=c(1,2), 
+	icex=1, sampleLegend=FALSE)
+@
+\caption{\textit{Probe intensities along chromosome, green = SoxNDam, orange = SoxN-DDam.}}
+\label{fig:visualiseBound}
+\end{figure}
+
+
+
+\section{Setting array specific parameters}\label{sec:para}
+
+The user has to specify the \Robject{probes} and \Robject{probe.max.spacing} parameters. 
+Both depend on the array platform and how densely the probes are spaced across the 
+genome on the tiling array. The minimum number of probes specifies how many probes 
+have to be in a valid region. The probe.max.spacing is the maximum distance in base 
+pairs allowed between probes before a region is split into separate regions.
+
+<<setArraySpecPara>>=
+probes <- 10
+probe.max.spacing <- 200
+@
+
+A frequency plot of number of probes per bound regions can be used to help determine 
+the probes parameter selection
+
+<<probeLengthPlot, eval=FALSE>>=
+probeLengthPlot(SGR, sgrset=1, chr=NULL, bound.cutoff, probe.max.spacing=200, 
+	xlim.max=25)
+@
+
+
+\begin{figure}[!hbtp]
+\centering
+<<probeLengthPlot, fig=TRUE, width=5.5, height=4, echo=FALSE>>=
+probeLengthPlot(SGR, sgrset=1, chr=NULL, bound.cutoff, probe.max.spacing=200, xlim.max=25)
+@
+\caption{\textit{Frequency plot of number of probes per bound region.}}
+\label{fig:probeLength}
+\end{figure}
+
+
+\section{Performing pairwise classification}\label{sec:pair}
+
+In this section we identify regions that are uniquely or commonly bound in two data sets. 
+First the probes for each data set are flagged as bound or not bound depending on whether the signal is above 
+the \Robject{bound.cutoff}. Then the probes are split into three classes:\newline
+Class 1: uniquely bound in set 1 (bound in set 1, not bound in set 2, signal 1 minus signal 2 above diff.cutoff).\newline
+Class 2: uniquely bound in set 2 (bound in set 2, not bound in set 1, signal 2 minus signal 1 above diff.cutoff)\newline
+Class 3: bound in both data sets\newline
+Then the classified probes are filtered into regions using the \Robject{probes} 
+and \Robject{probe.max.spacing} parameters. The regions for each class are exported to bed files, 
+which provide the chromosome, start and end positions, the name and a score for the region. 
+For example the score for class 1 is calculated as follows. First we subtract for each probe within a region 
+signal set 1 minus signal set 2, and then we calculate the mean over the region. The tool 
+uses the names of each data set and the selected parameters as the resulting file 
+names (b = bound.cutoff, d = diff.cutoff, v = probes, g = probe.max.spacing).
+
+In our example we query SoxNDam vs. DDam, which correspond to data set 1 and 3 in the 
+ExpessionSet object.
+
+<<pairwiseRegions, echo=TRUE>>=
+pairwiseR <- pairwiseRegions(SGR, sgrset=c(1,3), bound.cutoff, 
+	diff.cutoff, probes, probe.max.spacing)
+head(pairwiseR)
+@
+
+
+We also provide a ploting method to show the bound probes (before filtering into regions) 
+in colour.
+
+<<pairwiseBoundProbesPlot, eval=FALSE>>=
+plotBoundProbes(SGR, sgrset=c(1,2), method="pairwise", bound.cutoff, 
+	diff.cutoff)
+@
+
+<<pairwiseBoundProbesPlot, eval=TRUE, results=hide, echo=FALSE>>=
+png("SimBindProfiles-pairwiseBound.png")
+plotBoundProbes(SGR, sgrset=c(1,2), method="pairwise", bound.cutoff, diff.cutoff)
+dev.off()
+@
+
+\begin{figure}[!hbtp]
+\centering
+\includegraphics[width=0.5\textwidth]{SimBindProfiles-pairwiseBound.png}
+\caption{\textit{Scatterplot of pairwise classification of SoxNDam vs. DDam. Red highlights
+the unique SoxNDam probes, green unique in DDam and grey are probes common to both.}}
+\label{fig:pairwiseBoundProbesPlot}
+\end{figure}
+
+
+\section{Performing three-way classification}\label{sec:three}
+
+This tool allows identification of regions that are unique or common in three data 
+sets. The approach is the same as for the pairwise classification. The probes are 
+segregated into seven classes:\newline
+Class = 1: unique probes in set 1\newline
+Class = 2: unique probes in set 2\newline
+Class = 3: unique probes in set 3\newline
+Class = 4: common probes in set 1+2\newline
+Class = 5: common probes in set 2+3\newline
+Class = 6: common probes in set 1+3\newline
+Class = 7: common probes in set 1+2+3\newline
+Then the probes are again filtered into regions using the \Robject{probes} and 
+\Robject{probe.max.spacing} parameters. The regions for each class are exported to 
+bed files. The score is calculated similar to the pair-wise classification.
+
+In our example we query SoxNDam vs. SoxN-DDam vs. DDam (results not shown).
+
+<<threewayRegions, echo=TRUE, eval=FALSE>>=
+threewayR <- threewayRegions(SGR, sgrset=c(1,2,3), bound.cutoff, 
+	diff.cutoff, probes, probe.max.spacing)
+@
+
+
+
+\section{Performing increased binding classification}\label{sec:incr}
+
+It might be of interest to identify regions showing increased binding, which are more bound 
+in one dataset compared to the other. In our example, Dichaete can bind at a higher level 
+in the SoxN mutant embryos (SoxN-DDam) compared to the wt embryos (DDam) (Figure~\ref{fig:visualiseIncreasedBinding}).
+If the signal of a bound probe in set 1 is higher than the diff.cutoff, 
+then these probes are filtered into regions using the \Robject{probes} and 
+\Robject{probe.max.spacing} parameters and reported as bed file, which reports the chromosome, 
+start, end, name and score. The score is calculated similarly to the pairwise 
+classification.
+
+Compare set SoxN-DDam vs. DDam
+
+<<increasedBindingRegions, echo=TRUE, eval=FALSE>>=
+increasedR <- increasedBindingRegions(SGR, sgrset=c(2,3), bound.cutoff, diff.cutoff, 
+	probes, probe.max.spacing)
+head(increasedR)
+@
+
+<<increasedBindingRegionsprecomputed, echo=FALSE, eval=TRUE>>=
+head(increasedR)
+@
+
+Visualise the second increased binding region in genomic context.
+
+<<visualiseIncreasedBinding, eval=FALSE>>=
+plot(SGR, probeAnno, chrom="X", xlim=c(4589000,4593200), ylim=c(-0.5,5), 
+	samples=c(2,3))
+@
+
+\begin{figure}[!hbtp]
+\centering
+<<visualiseIncreasedBinding, fig=TRUE, width=6, height=3, pointsize=8, echo=FALSE>>=
+plot(SGR, probeAnno, chrom="X", xlim=c(4589000,4593200), ylim=c(-0.5,5), samples=c(2,3), 
+	icex=1, sampleLegend=FALSE)
+@
+\caption{\textit{Probe intensities along chromosome at increased binding region, 
+green = SoxN-DDam, orange = DDam.}}
+\label{fig:visualiseIncreasedBinding}
+\end{figure}
+
+
+To plot the probes showing increased binding (before filtering into regions) in colour 
+(Figure~\ref{fig:increasedBindingBoundProbesPlot}).
+
+<<increasedBindingBoundProbesPlot, eval=FALSE>>=
+plotBoundProbes(SGR, sgrset=c(2,3), method="increasedBinding", bound.cutoff, 
+	diff.cutoff, pcex=4)
+@
+
+<<increasedBindingBoundProbesPlot, eval=TRUE, results=hide, echo=FALSE>>=
+png("SimBindProfiles-increasedBindingBound.png")
+plotBoundProbes(SGR, sgrset=c(2,3), method="increasedBinding", bound.cutoff, diff.cutoff,
+	pcex=4)
+dev.off()
+@
+
+
+\begin{figure}[!hbtp]
+\centering
+\includegraphics[width=0.5\textwidth]{SimBindProfiles-increasedBindingBound.png}
+\caption{\textit{Scatterplot of increased binding classification of SoxNDam vs. DDam, 
+increased binding probes are highlighted in blue}}
+\label{fig:increasedBindingBoundProbesPlot}
+\end{figure}
+
+
+
+\section{Performing compensation classification}\label{sec:comp}
+
+This is another special case in which we want to identify regions which are bound 
+in two sets but not in the third. In our example, in wt embryos Dichaete is not bound 
+(DDam) and SoxN is bound (SoxNDam). However, in SoxN mutants (SoxN-DDam) Dichaete binds 
+at this location to compensate for the loss of SoxN (Figure~\ref{fig:visualiseCompensation}). 
+Probes above the bound.cutoff for which the 
+average bound signal of set 1 and set 2 are larger than the diff.cutoff to the non-bound 
+set 3 are identified. The probes are again filtered into regions using the 
+\Robject{probes} and \Robject{probe.max.spacing} parameters and reported in a bed file, 
+which gives the chromosome, start, end, name and score.
+
+Compare set SoxNDam + SoxN-DDam vs. DDam
+
+<<compensationRegions, echo=TRUE, eval=FALSE>>=
+compR <- compensationRegions(SGR, sgrset=c(1,2,3), bound.cutoff, 
+	diff.cutoff, probes, probe.max.spacing)
+head(compR)
+@
+
+<<compensationRegionsprecomputed, echo=FALSE, eval=TRUE>>=
+head(compR)
+@
+
+
+Visualise a compensation region in genomic context (Figure~\ref{fig:visualiseCompensation}).
+
+<<visualiseCompensation, eval=FALSE>>=
+plot(SGR, probeAnno, chrom="X", xlim=c(2943000,2947000), ylim=c(-1,4))
+@
+
+\begin{figure}[!hbtp]
+\centering
+<<visualiseCompensation, fig=TRUE, width=6, height=3, pointsize=8, echo=FALSE>>=
+plot(SGR, probeAnno, chrom="X", xlim=c(2943000,2947000), ylim=c(-1,4),
+	icex=1)
+@
+\caption{\textit{Probe intensities along chromosome, green = SoxN-DDam, orange = SoxN-DDam,
+blue = DDam.}}
+\label{fig:visualiseCompensation}
+\end{figure}
+
+To plot the probes showing compensation (before filtering into regions) in colour 
+(Figure~\ref{fig:compensationBoundProbesPlot}).
+
+<<compensationBoundProbesPlot, eval=FALSE>>=
+plotBoundProbes(SGR, sgrset=c(1,2,3), method="compensation", bound.cutoff, 
+	diff.cutoff, pcex=4)
+@
+
+<<compensationBoundProbesPlot, eval=TRUE, results=hide, echo=FALSE>>=
+png("SimBindProfiles-compensationBound.png")
+plotBoundProbes(SGR, sgrset=c(1,2,3), method="compensation", bound.cutoff, diff.cutoff,
+	pcex=4)
+dev.off()
+@
+
+
+\begin{figure}[!hbtp]
+\centering
+\includegraphics[width=0.5\textwidth]{SimBindProfiles-compensationBound.png}
+\caption{\textit{Scatterplot of compensation classification of 
+SoxNDam + SoxN-DDam vs. DDam. Probes which are bound in SoxNDam + SoxN-DDam 
+but not in DDAm are highlighted in orange.}}
+\label{fig:compensationBoundProbesPlot}
+\end{figure}
+
+\section{Concluding Remarks}\label{sec:remarks}
+The package \Rpackage{SimBindProfiles} facilitates the comparison of ChIP-chip or DamID 
+profiles generated on the same microarray platform. It provides functions for data 
+import, normalization and analysis. High-level plots for quality 
+assessment are available. While this analysis approach worked well with our data,
+we do not claim it is the definite algorithm for this task.\medskip
+
+
+This vignette was generated using the following package versions:
+
+<<sessionInfo, echo=FALSE, results=tex>>=
+toLatex(sessionInfo())
+@
+
+\section*{Acknowledgments}
+Many thanks to Enrico Ferrero who generated the data sets and our conductive 
+discussions about the analysis approach, Steven Russell for helpful suggestions 
+and Robert Stojnic for source code contributions to SimBindProfiles. 
+
+
+\bibliographystyle{abbrv}
+\bibliography{SimBindProfiles-Bibliography}
+
+
+
+\end{document}

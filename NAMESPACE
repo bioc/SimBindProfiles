@@ -1,0 +1,13 @@
+import("methods","mclust", "Biobase", "Ringo")
+importFrom("limma", "normalizeBetweenArrays")
+
+export("eSetScatterPlot",
+	"findBoundCutoff",
+	"increasedBindingRegions",
+	"pairwiseRegions",
+	"plotBoundProbes",
+	"probeAnnoFromESet",
+	"probeLengthPlot",
+	"readSgrFiles",
+	"threewayRegions",
+	"compensationRegions")

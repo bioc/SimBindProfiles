@@ -1,0 +1,15 @@
+Package: SimBindProfiles
+Title: Similar Binding Profiles
+Version: 0.99.1
+Date: 2013-09-17
+Author: Bettina Fischer, Enrico Ferrero, Robert Stojnic, Steve Russell
+Maintainer: Bettina Fischer <bef22@cam.ac.uk>
+Description: SimBindProfiles identifies common and unique binding regions in genome tiling array data. 
+	This package does not rely on peak calling, but directly compares binding profiles 
+	processed on the same array platform. It implements a simple threshold approach, 
+	thus allowing retrieval of commonly and differentially bound regions between 
+	datasets as well as events of compensation and increased binding.
+Depends: R (>= 2.10), methods, Ringo
+Imports: limma, mclust, Biobase
+biocViews: Microarray, Software
+License: GPL-3

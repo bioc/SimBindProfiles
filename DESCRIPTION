@@ -1,6 +1,6 @@
 Package: SimBindProfiles
 Title: Similar Binding Profiles
-Version: 1.41.0
+Version: 1.41.1
 Date: 2013-09-17
 Author: Bettina Fischer, Enrico Ferrero, Robert Stojnic, Steve Russell
 Maintainer: Bettina Fischer <bef22@cam.ac.uk>
@@ -13,3 +13,4 @@ Depends: R (>= 2.10), methods, Ringo
 Imports: limma, mclust, Biobase
 biocViews: Microarray, Software
 License: GPL-3
+PackageStatus: Deprecated
